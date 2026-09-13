@@ -1,12 +1,34 @@
 
-import os
-import sqlite3
 from datetime import date, timedelta
-import pandas as pd
 import streamlit as st
 
-DB_PATH = os.getenv("CATERING_DB", "catering.db")
-ADMIN_PIN = os.getenv("ADMIN_PIN", "1234")
+from database import (
+    IntegrityError,
+    delete_rating,
+    individuals_between,
+    init_db,
+    menu_between,
+    rating_for,
+    rename_profile,
+    save_menu,
+    save_rating,
+    stats_between,
+    users,
+)
+
+
+def setting(name, default=None):
+    """Read a setting from Streamlit Secrets, with environment fallback."""
+    try:
+        value = st.secrets.get(name)
+    except (FileNotFoundError, KeyError):
+        value = None
+    if value is not None:
+        return str(value)
+
+    import os
+    return os.getenv(name, default)
+
 
 st.set_page_config(
     page_title="Daily Table",
@@ -14,6 +36,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+ADMIN_PIN = setting("ADMIN_PIN", "1234")
 
 st.markdown("""
 <style>
@@ -70,172 +94,15 @@ hr {margin-top: .75rem; margin-bottom: .75rem;}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- DB ----------------
-
-def conn():
-    c = sqlite3.connect(DB_PATH, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    return c
-
-def init_db():
-    c = conn()
-    cur = c.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS menu(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            menu_date TEXT NOT NULL UNIQUE,
-            main_dish TEXT NOT NULL,
-            side_dish TEXT,
-            salad TEXT,
-            dessert TEXT,
-            notes TEXT
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ratings(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            menu_date TEXT NOT NULL,
-            food_choice INTEGER NOT NULL CHECK(food_choice BETWEEN 1 AND 5),
-            taste INTEGER NOT NULL CHECK(taste BETWEEN 1 AND 5),
-            cleanliness INTEGER NOT NULL CHECK(cleanliness BETWEEN 1 AND 5),
-            service INTEGER NOT NULL CHECK(service BETWEEN 1 AND 5),
-            comment TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_id, menu_date),
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    """)
-    # Migration for existing DBs created by v1
-    cols = [r["name"] for r in cur.execute("PRAGMA table_info(menu)").fetchall()]
-    if "dessert" not in cols:
-        cur.execute("ALTER TABLE menu ADD COLUMN dessert TEXT")
-
-    count = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    if count == 0:
-        cur.executemany("INSERT INTO users(name) VALUES (?)",
-                        [(f"User {i}",) for i in range(1, 21)])
-    c.commit()
-    c.close()
-
 def monday(d):
     return d - timedelta(days=d.weekday())
 
-def users():
-    c = conn()
-    rows = c.execute("SELECT id,name FROM users WHERE active=1 ORDER BY name").fetchall()
-    c.close()
-    return rows
-
-def menu_between(start, end):
-    c = conn()
-    rows = c.execute("""
-        SELECT menu_date,main_dish,side_dish,salad,dessert,notes
-        FROM menu WHERE menu_date BETWEEN ? AND ?
-        ORDER BY menu_date
-    """, (start.isoformat(), end.isoformat())).fetchall()
-    c.close()
-    return {r["menu_date"]: dict(r) for r in rows}
-
-def rating_for(user_id, menu_date):
-    c = conn()
-    row = c.execute("""
-        SELECT food_choice,taste,cleanliness,service,comment
-        FROM ratings WHERE user_id=? AND menu_date=?
-    """, (user_id, menu_date)).fetchone()
-    c.close()
-    return dict(row) if row else None
-
-def save_rating(user_id, menu_date, vals, comment):
-    c = conn()
-    c.execute("""
-        INSERT INTO ratings(user_id,menu_date,food_choice,taste,cleanliness,service,comment)
-        VALUES (?,?,?,?,?,?,?)
-        ON CONFLICT(user_id,menu_date) DO UPDATE SET
-          food_choice=excluded.food_choice,
-          taste=excluded.taste,
-          cleanliness=excluded.cleanliness,
-          service=excluded.service,
-          comment=excluded.comment,
-          updated_at=CURRENT_TIMESTAMP
-    """, (user_id, menu_date, *vals, comment))
-    c.commit()
-    c.close()
-
-def save_menu(menu_date, main, side, salad, dessert, notes):
-    c = conn()
-    c.execute("""
-        INSERT INTO menu(menu_date,main_dish,side_dish,salad,dessert,notes)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(menu_date) DO UPDATE SET
-          main_dish=excluded.main_dish,
-          side_dish=excluded.side_dish,
-          salad=excluded.salad,
-          dessert=excluded.dessert,
-          notes=excluded.notes
-    """, (menu_date, main, side, salad, dessert, notes))
-    c.commit()
-    c.close()
-
-def stats_between(start, end):
-    c = conn()
-    df = pd.read_sql_query("""
-        SELECT
-          r.menu_date AS Date,
-          COUNT(*) AS Responses,
-          ROUND(AVG(r.food_choice),2) AS "Food choice",
-          ROUND(AVG(r.taste),2) AS Taste,
-          ROUND(AVG(r.cleanliness),2) AS Cleanliness,
-          ROUND(AVG(r.service),2) AS Service,
-          ROUND(AVG((r.food_choice+r.taste+r.cleanliness+r.service)/4.0),2) AS Overall
-        FROM ratings r
-        WHERE r.menu_date BETWEEN ? AND ?
-        GROUP BY r.menu_date
-        ORDER BY r.menu_date
-    """, c, params=(start.isoformat(), end.isoformat()))
-    c.close()
-    return df
-
-def individuals_between(start, end):
-    c = conn()
-    df = pd.read_sql_query("""
-        SELECT
-          r.menu_date AS Date,
-          u.name AS User,
-          r.food_choice AS "Food choice",
-          r.taste AS Taste,
-          r.cleanliness AS Cleanliness,
-          r.service AS Service,
-          ROUND((r.food_choice+r.taste+r.cleanliness+r.service)/4.0,2) AS Overall,
-          COALESCE(r.comment,'') AS Comment
-        FROM ratings r
-        JOIN users u ON u.id=r.user_id
-        WHERE r.menu_date BETWEEN ? AND ?
-        ORDER BY r.menu_date DESC,u.name
-    """, c, params=(start.isoformat(), end.isoformat()))
-    c.close()
-    return df
-
-def rename_profile(uid, new_name):
-    c = conn()
-    c.execute("UPDATE users SET name=? WHERE id=?", (new_name.strip(), uid))
-    c.commit()
-    c.close()
-
-def delete_rating(uid, menu_date):
-    c = conn()
-    c.execute("DELETE FROM ratings WHERE user_id=? AND menu_date=?", (uid, menu_date))
-    c.commit()
-    c.close()
-
-init_db()
+try:
+    init_db()
+except Exception:
+    st.error("The app could not connect to PostgreSQL.")
+    st.info("Add DATABASE_URL to Streamlit Secrets, then restart the app. See README.md for the exact format.")
+    st.stop()
 
 # ---------------- State ----------------
 
@@ -449,13 +316,16 @@ with tabs[3]:
             current_users = users()
             name_to_id = {r["name"]: r["id"] for r in current_users}
             selected = st.selectbox("Profile", list(name_to_id))
-            new_name = st.text_input("Rename profile", value=selected)
+            new_name = st.text_input("Rename profile", value=selected, max_chars=100)
             if st.button("Save profile name"):
-                try:
-                    rename_profile(name_to_id[selected], new_name)
-                    if st.session_state.user_id == name_to_id[selected]:
-                        st.session_state.user_name = new_name.strip()
-                    st.success("Profile updated.")
-                    st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("That name already exists.")
+                if not new_name.strip():
+                    st.error("Profile name cannot be empty.")
+                else:
+                    try:
+                        rename_profile(name_to_id[selected], new_name)
+                        if st.session_state.user_id == name_to_id[selected]:
+                            st.session_state.user_name = new_name.strip()
+                        st.success("Profile updated.")
+                        st.rerun()
+                    except IntegrityError:
+                        st.error("That name already exists.")
