@@ -181,10 +181,19 @@ st.markdown("""
   border-radius: 22px;
   margin-bottom: 1rem;
 }
-.profile-card button {
+.st-key-profile_grid button {
   min-height: 64px;
   border-radius: 16px !important;
   font-weight: 650 !important;
+}
+@media (max-width: 640px) {
+  .st-key-profile_grid [data-testid="stButton"] {
+    flex: 1 0 100% !important;
+    width: 100% !important;
+  }
+  .st-key-profile_grid [data-testid="stButton"] button {
+    width: 100% !important;
+  }
 }
 .small-note { opacity: .72; font-size: .9rem; }
 div[data-testid="stMetric"] {
@@ -323,22 +332,27 @@ with tabs[0]:
     st.subheader(tr("choose_profile"))
     st.caption(tr("profile_help"))
 
-    all_users = users()
-    for row_start in range(0, len(all_users), 4):
-        row_columns = st.columns(4)
-        for column, row in zip(row_columns, all_users[row_start : row_start + 4]):
-            with column:
-                st.markdown('<div class="profile-card">', unsafe_allow_html=True)
-                prefix = "✓" if st.session_state.user_id == row["id"] else "👤"
-                if st.button(
-                    f"{prefix} {row['name']}",
-                    key=f"profile_{row['id']}",
-                    use_container_width=True,
-                ):
-                    st.session_state.user_id = row["id"]
-                    st.session_state.user_name = row["name"]
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
+    # Keep the original profile-slot order even after names are edited. A
+    # wrapping horizontal container preserves that same sequence on mobile;
+    # unlike st.columns, it never groups every fourth profile together.
+    all_users = sorted(users(), key=lambda row: row["id"])
+    with st.container(
+        key="profile_grid",
+        horizontal=True,
+        wrap=True,
+        horizontal_alignment="center",
+        gap="small",
+    ):
+        for row in all_users:
+            prefix = "✓" if st.session_state.user_id == row["id"] else "👤"
+            if st.button(
+                f"{prefix} {row['name']}",
+                key=f"profile_{row['id']}",
+                width=220,
+            ):
+                st.session_state.user_id = row["id"]
+                st.session_state.user_name = row["name"]
+                st.rerun()
 
     if st.session_state.user_id:
         st.success(f"{tr('current_profile')}: **{st.session_state.user_name}**")
